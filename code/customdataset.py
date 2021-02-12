@@ -11,6 +11,7 @@ from torchvision import utils, models
 from torch.utils.data import Dataset
 
 from scipy.spatial.transform import Rotation as R
+from qmath import RT2QT
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -30,6 +31,8 @@ class scene(Dataset):
 		self.transform = transform
 		self.seq_nums = []
 		self.seq_image_count = []
+		self.poses = np.empty((0, 7))
+
 		sp = []
 		trainsp = open(os.path.join(self.scene_data_path,"TrainSplit.txt"))
 		testsp = open(os.path.join(self.scene_data_path,"TestSplit.txt"))
@@ -48,11 +51,16 @@ class scene(Dataset):
 			self.seq_nums.append(seq)
 			b = (len(os.listdir(os.path.join(self.scene_data_path,"seq-"+seq))) // 3)
 			self.seq_image_count.append(b)
+			frame_idx = np.array(range(b), dtype=np.int)
+			pss = [np.loadtxt(os.path.join(self.scene_data_path, "seq-"+seq,'frame-{:06d}.pose.txt'.format(i))).flatten()[:12] for i in frame_idx]
+			pss = RT2QT(np.asarray(pss), np.array([0,0,0]), np.array([1,1,1]))
+			self.poses = np.vstack((self.poses, pss))
 			a += b
 		self.numsequences = a
 
 	def __len__(self):
 		return sum(self.seq_image_count)
+
 
 	def __getitem__(self, idx):
 
@@ -80,21 +88,22 @@ class scene(Dataset):
 		else:
 			imid = "000"+str(idx2)
 		image = io.imread(os.path.join(self.scene_data_path,"seq-"+self.seq_nums[seq_idx],"frame-"+imid+".color.png")) # frame-000000.color.png
-		posefile = open(os.path.join(self.scene_data_path,"seq-"+self.seq_nums[seq_idx],"frame-"+imid+".pose.txt"))
-		pose = []
-		for line in posefile:
-			p = line[:-1].split()
-			p = np.array([float(x) for x in p])
-			pose.append(p)
-		pose = np.array(pose)
+		# posefile = open(os.path.join(self.scene_data_path,"seq-"+self.seq_nums[seq_idx],"frame-"+imid+".pose.txt"))
+		# pose = []
+		# for line in posefile:
+		# 	p = line[:-1].split()
+		# 	p = np.array([float(x) for x in p])
+		# 	pose.append(p)
+		# pose = np.array(pose)
+		pose = self.poses[idx2]
 		
 		# converting 4x4 matrix to rotation and translation, 7-dimensions
 
-		rotationmatrix = pose[:3,:3]
-		translation = pose[:3,3]
-		r = R.from_dcm(rotationmatrix)
-		rotation = r.as_quat()
-		pose = np.concatenate([translation, rotation])
+		# rotationmatrix = pose[:3,:3]
+		# translation = pose[:3,3]
+		# r = R.from_dcm(rotationmatrix)
+		# rotation = r.as_quat()
+		# pose = np.concatenate([translation, rotation])
 		sample = {'image': image, 'pose': pose}
 		
 		if self.transform:
