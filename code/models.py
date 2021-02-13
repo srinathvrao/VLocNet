@@ -16,17 +16,16 @@ import transforms3d.quaternions as txq
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-class SiameseNetwork(nn.Module):
+class VLocNet(nn.Module):
 	def __init__(self):
-		super(SiameseNetwork, self).__init__()
+		super(VLocNet, self).__init__()
 		# Setting up the Sequential of CNN Layers
 		res50 = models.resnet50(pretrained=True)
 		res50 = res50.double()
-
-		self.siamnn = nn.Sequential(*list(res50.children())[:-2])
-		self.fcOut = nn.Sequential(*list(self.siamnn.children())[-1:])
-		self.siamnn = nn.Sequential(*list(self.siamnn.children())[:-1]).cuda()
-		self.fcOut.add_module("fc",nn.Sequential(
+		self.sharednn = nn.Sequential(*list(res50.children())[:-4]).cuda()
+		self.siam_mid = nn.Sequential(*list(res50.children())[-4]).cuda()
+		self.siam_fc = nn.Sequential(*list(res50.children())[-3])
+		self.siam_fc.add_module("fc",nn.Sequential(
 			nn.AvgPool2d(kernel_size=(5,5)),
 			nn.Dropout2d(p=0.2),
 			nn.Flatten(0),
@@ -36,34 +35,7 @@ class SiameseNetwork(nn.Module):
 			nn.Linear(1024, 7)
 			).cuda()
 		)
-		for param in self.siamnn.parameters():
-			param.requires_grad = True
-		for param in self.fcOut.parameters():
-			param.requires_grad = True
-	
-	def update_siam(self, gposenn):
-		sharednn = nn.Sequential()
-		sharednn.add_module("shared",nn.Sequential(*list(gposenn.children())[0]))
-		sharednn.add_module("siamn6",nn.Sequential(*list(self.siamnn.children())[-1]))
-		self.siamnn = sharednn.cuda()
-		for param in self.siamnn.parameters():
-			param.requires_grad = True
 
-	def forward(self, x , xminus1):
-		# halfnn = nn.Sequential(*list(self.siamnn.children())[:-2]).cuda()
-		x_fmap, xminus1_fmap = self.siamnn(x), self.siamnn(xminus1)
-		cat_fmap = torch.cat((xminus1_fmap, x_fmap), 0)
-		output = self.fcOut(cat_fmap)
-		return output
-
-class GlobalPoseNetwork(nn.Module):
-	def __init__(self, siamnn):
-		super(GlobalPoseNetwork, self).__init__()
-		# Setting up the Sequential of CNN Layers
-		res50 = models.resnet50(pretrained=True)
-		res50 = res50.double()
-
-		self.shared_nn = nn.Sequential()
 		self.gpose = nn.Sequential(*list(res50.children())[-4:-2]).cuda()
 		self.gpose.add_module("fc",nn.Sequential(
 			nn.AvgPool2d(kernel_size=(5,5)),
@@ -73,16 +45,25 @@ class GlobalPoseNetwork(nn.Module):
 			nn.ReLU(inplace=True),
 			# Final Dense Layer
 			nn.Linear(1024, 7)
-			).cuda())
+			).cuda()
+		)
+
+		for param in self.sharednn.parameters():
+			param.requires_grad = True
+		for param in self.siam_mid.parameters():
+			param.requires_grad = True
+		for param in self.siam_fc.parameters():
+			param.requires_grad = True
 		for param in self.gpose.parameters():
 			param.requires_grad = True
+	
+	def forward(self, x, xminus1):
+		# halfnn = nn.Sequential(*list(self.siamnn.children())[:-2]).cuda()
+		x_sharedmap = self.sharednn(x)
+		xminus1_sharedmap = self.sharednn(xminus1)
+		cat_fmap = torch.cat((self.siam_mid(xminus1_sharedmap), self.siam_mid(x_sharedmap)), 0)
 		
-	def update_siam(self, siam):
-		self.shared_nn = nn.Sequential(*list(siam.children())[0][:-1]).cuda()
-		for param in self.shared_nn.parameters():
-			param.requires_grad = True
+		task1_op = self.siam_fc(cat_fmap)
+		task2_op = self.gpose(x_sharedmap)
 
-	def forward(self, x):
-		shared_fmap = self.shared_nn(x)
-		gpose_op = self.gpose(shared_fmap)
-		return gpose_op # <- change this
+		return task1_op, task2_op
