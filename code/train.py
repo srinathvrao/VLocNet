@@ -19,106 +19,139 @@ from models import SiameseNetwork as SiamNN, GlobalPoseNetwork as GPoseNN
 
 from customdataset import scene, Rescale, RandomCrop, ToTensor
 print("finished imports.")
-def printProgressBar (iteration, total, prefix = '', suffix = '', decimals = 1, length = 100, fill = '█', printEnd = "\r"):
-    percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
-    filledLength = int(length * iteration // total)
-    bar = fill * filledLength + '-' * (length - filledLength)
-    print(f'\r{prefix} |{bar}| {percent}% {suffix}', end = printEnd)
-    # Print New Line on Complete
-    if iteration == total: 
-        print()
 
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print("device selected.")
 fire_trainset = scene(
-					scene_data='fire/',
+					scene_data='heads/',
 					train=True,
 					transform=transforms.Compose([
 						Rescale(256),
 						RandomCrop(224),
 						ToTensor()
                    ]))
-print("trainset declared.")
-batch_size = 20
-trainloader = DataLoader(fire_trainset, batch_size=batch_size, num_workers=2)
-import math
-c=0
-print("trainset loaded.")
-siamnn = SiamNN().double().cuda()
-gposenn = GPoseNN(siamnn).double().cuda()
-print("declared model variables.")
-z = len(trainloader)
 
+fire_val_test_set = scene(
+					scene_data='heads/',
+					train=False,
+					transform=transforms.Compose([
+						Rescale(256),
+						RandomCrop(224),
+						ToTensor()
+                   ]))
+print("Dataset declared.")
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print("Device selected:",device)
+batch_size = 20
+batch_size2 = 250
+trainloader = DataLoader(fire_trainset, batch_size=batch_size, num_workers=2,shuffle=False)
+trainloader2 = DataLoader(fire_trainset, batch_size=batch_size2, num_workers=2,shuffle=False)
+valtestloader = DataLoader(fire_val_test_set, batch_size=batch_size2, num_workers=2,shuffle=False)
+print("Dataloaders declared.")
+
+c=0
+vlocn = VLocNet().double().cuda()
+print("Vlocnet initialized.")
+z = len(trainloader)
+v = len(valtestloader) // 2 # <- 2 is number of test splits given. using 1st split for validation.
 mseloss = nn.MSELoss()
-for param in siamnn.parameters():
+for param in vlocn.parameters():
 	param.requires_grad = True
-for param in gposenn.parameters():
-	param.requires_grad = True
+optimizer = optim.Adam(vlocn.parameters(), lr=1e-4)
 l = len(trainloader)*batch_size
+l2 = len(valtestloader)*batch_size2 // 2
+
 print("Starting Training")
 for epoch in range(120):
 	c=0
-	printProgressBar(0, l, prefix = 'Epoch '+str(epoch+1)+':', suffix = 'Complete', length = 50)
-	for batch in trainloader: # loads batch_size number of images and poses
-		y_pred = torch.empty(0,7).cuda()
+	for k, train_batch in enumerate(trainloader,0):
+		train_batch['image'] = train_batch['image'].to(device)
 		y_true = torch.empty(0,7).cuda()
-
-		pose_pred = torch.empty(0,7).cuda()
 		pose_true = torch.empty(0,7).cuda()
-
-		optimizer = optim.Adam(siamnn.parameters(), lr=1e-4)
-
-		for i in range(0,batch_size-1): # considering 2 samples (i, i+1) at a time in a batch
-			img_minus1 = batch['image'][i].unsqueeze(0).to(device)
-			img_1 = batch['image'][i+1].unsqueeze(0).to(device)
-			predicted_output = siamnn(img_1,img_minus1).unsqueeze(0)
-			y_pred = torch.cat((y_pred, predicted_output), 0)
-			
-			p_minus1 = batch['pose'][i].unsqueeze(0)
-			p_1 = batch['pose'][i+1].unsqueeze(0)
+		y_pred, pose_pred = vlocn(train_batch['image'],batch_size) # predicting output for both tasks
+		torch.cuda.empty_cache()
+		poses = train_batch['pose'].unsqueeze(1)
+		del train_batch
+		torch.cuda.empty_cache()
+		for i in range(0,batch_size-1): # calculating ground truth for task 1. (task 2 gt is already there)
+			p_minus1 = poses[i]
+			p_1 = poses[i+1]
 			actual_output = calc_vo_relative(p_minus1,p_1).cuda()
 			y_true = torch.cat((y_true, actual_output), 0)
-			
-			del img_minus1, img_1, predicted_output, p_minus1, p_1, actual_output
-
-		loss = mseloss(y_pred, y_true)
+			pose_true = torch.cat((pose_true, p_1.cuda()), 0)
+			del p_minus1, p_1, actual_output
+			torch.cuda.empty_cache()
+		
+		loss = mseloss(y_pred, y_true) + mseloss(pose_pred,pose_true)
 		optimizer.zero_grad()
 		loss.backward()
 		optimizer.step()
-		gposenn.update_siam(siamnn)
+		del y_pred, y_true, pose_pred, pose_true, loss
+		torch.cuda.empty_cache()
 
-		del y_pred, y_true
-
-		y_pred = torch.empty(0,7).cuda()
-		y_true = torch.empty(0,7).cuda()
-
-		gposeoptim = optim.Adam(gposenn.parameters(), lr=1e-4)
-
-		for i in range(0,batch_size):
-			img_1 = batch['image'][i].unsqueeze(0).to(device)
-			p_1 = batch['pose'][i].unsqueeze(0).to(device)
-			pred_gpose = gposenn(img_1).unsqueeze(0)
-			y_pred = torch.cat((y_pred, pred_gpose), 0)
-			y_true = torch.cat((y_true, p_1), 0)
-
-			del img_1, p_1, pred_gpose
-
-		gposeloss = mseloss(y_pred, y_true)
-		gposeoptim.zero_grad()
-		gposeloss.backward()
-		gposeoptim.step()
-		siamnn.update_siam(gposenn)
-
-		del y_pred, y_true
 		c+=batch_size
-		
-		printProgressBar(c, l, prefix = 'Epoch '+str(epoch+1)+':', suffix = 'vo_loss: '+'{:.4f}'.format(loss)+' gpose_loss: '+'{:.4f}'.format(gposeloss)  , length = 50)
-		
-	if epoch % 5 == 0:
+		print(str(c)+"/"+str(l),end=' ')
+		if c%100==0:
+			z=0
+			st = "Epoch "+str(epoch+1)+" "+str(c)+"/"+str(l)+" ... "
+			print("\n"+st, end='')	
+			with torch.no_grad():
+			  y_pred = torch.empty(0,7).cuda()
+			  y_true = torch.empty(0,7).cuda()
+			  pose_pred = torch.empty(0,7).cuda()
+			  pose_true = torch.empty(0,7).cuda()
+			  for j, t_batch in enumerate(trainloader2,0):
+			    t_batch['image'] = t_batch['image'].to(device)
+			    poses = t_batch['pose'].unsqueeze(1)
+			    y_p, pose_p = vlocn(t_batch['image'],batch_size2) # predicting output for both tasks
+			    y_pred = torch.cat((y_pred, y_p), 0)
+			    pose_pred = torch.cat((pose_pred, pose_p), 0)
+			    del y_p, pose_p, t_batch
+			    for i in range(0,batch_size2-1): # calculating ground truth for task 1. (task 2 gt is already there)
+			      p_minus1 = poses[i]
+			      p_1 = poses[i+1]
+			      actual_output = calc_vo_relative(p_minus1,p_1).cuda()
+			      y_true = torch.cat((y_true, actual_output), 0)
+			      pose_true = torch.cat((pose_true, p_1.cuda()), 0)
+			      del p_minus1, p_1, actual_output
+			      torch.cuda.empty_cache()
+			  train_loss = mseloss(y_pred, y_true) + mseloss(pose_pred,pose_true)
+			  print("trainset loss: ",train_loss.item(), end=' ')
+			  del train_loss, y_pred, y_true, pose_pred, pose_true
+			  torch.cuda.empty_cache()
+
+			  zz = 0
+			  y_pred = torch.empty(0,7).cuda()
+			  y_true = torch.empty(0,7).cuda()
+			  pose_pred = torch.empty(0,7).cuda()
+			  pose_true = torch.empty(0,7).cuda()
+			  for j, t_batch in enumerate(valtestloader,0):
+			    t_batch['image'] = t_batch['image'].to(device)
+			    poses = t_batch['pose'].unsqueeze(1)
+			    y_p, pose_p = vlocn(t_batch['image'],batch_size2) # predicting output for both tasks
+			    y_pred = torch.cat((y_pred, y_p), 0)
+			    pose_pred = torch.cat((pose_pred, pose_p), 0)
+			    del y_p, pose_p, t_batch
+			    for i in range(0,batch_size2-1): # calculating ground truth for task 1. (task 2 gt is already there)
+			      p_minus1 = poses[i]
+			      p_1 = poses[i+1]
+			      actual_output = calc_vo_relative(p_minus1,p_1).cuda()
+			      y_true = torch.cat((y_true, actual_output), 0)
+			      pose_true = torch.cat((pose_true, p_1.cuda()), 0)
+			      del p_minus1, p_1, actual_output
+			      torch.cuda.empty_cache()
+			    zz+=batch_size2
+			    if zz==l2:
+			      break
+			  print(y_pred.shape, y_true.shape, pose_pred.shape, pose_true.shape)
+			  val_loss = mseloss(y_pred, y_true) + mseloss(pose_pred,pose_true)
+			  print("valset loss: ",val_loss.item(), end=' ')
+			  del val_loss, y_pred, y_true, pose_pred, pose_true
+			  torch.cuda.empty_cache()
+     
+	if (epoch+1) % 3 == 0:
 		print("Saving Checkpoint..")
 		PATH = "models/epoch"+str(epoch+1)+".pth"
-		torch.save(siamnn, PATH)
-	
+		torch.save(vlocn, PATH)
+
 		# model = torch.load(PATH)
 		# model.eval()
