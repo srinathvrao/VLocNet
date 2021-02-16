@@ -76,3 +76,4 @@ class VLocNet(nn.Module):
 
 			del img_minus1, img_1, x_sharedmap, xminus1_sharedmap, cat_fmap, task1_op, task2_op
 			torch.cuda.empty_cache()
+		return y_pred, pose_pred
