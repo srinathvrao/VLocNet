@@ -57,13 +57,22 @@ class VLocNet(nn.Module):
 		for param in self.gpose.parameters():
 			param.requires_grad = True
 	
-	def forward(self, x, xminus1):
-		# halfnn = nn.Sequential(*list(self.siamnn.children())[:-2]).cuda()
-		x_sharedmap = self.sharednn(x)
-		xminus1_sharedmap = self.sharednn(xminus1)
-		cat_fmap = torch.cat((self.siam_mid(xminus1_sharedmap), self.siam_mid(x_sharedmap)), 0)
-		
-		task1_op = self.siam_fc(cat_fmap)
-		task2_op = self.gpose(x_sharedmap)
+	def forward(self, images, batch_size):
 
-		return task1_op, task2_op
+		y_pred = torch.empty(0,7).cuda()
+		pose_pred = torch.empty(0,7).cuda()
+		images = images.unsqueeze(1)
+
+		for i in range(0,batch_size-1):
+			img_minus1 = images[i]
+			img_1 = images[i+1]
+			x_sharedmap = self.sharednn(img_1)
+			xminus1_sharedmap = self.sharednn(img_minus1)
+			cat_fmap = torch.cat((self.siam_mid(xminus1_sharedmap), self.siam_mid(x_sharedmap)), 0)
+			task1_op = self.siam_fc(cat_fmap).unsqueeze(0)
+			task2_op = self.gpose(x_sharedmap).unsqueeze(0)
+			y_pred = torch.cat((y_pred, task1_op), 0)
+			pose_pred = torch.cat((pose_pred, task2_op), 0)
+
+			del img_minus1, img_1, x_sharedmap, xminus1_sharedmap, cat_fmap, task1_op, task2_op
+			torch.cuda.empty_cache()
