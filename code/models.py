@@ -36,7 +36,7 @@ class VLocNet(nn.Module):
 
 		self.siamfc_end = nn.Sequential(
       nn.Linear(2048, 1024),
-			nn.ReLU(inplace=True),
+			nn.ELU(inplace=True),
 			# Final Dense Layer
 			nn.Linear(1024, 7)
     ).cuda()
@@ -54,9 +54,9 @@ class VLocNet(nn.Module):
 			nn.Dropout2d(p=0.2),
 			nn.Flatten(1),
       nn.Linear(4096, 2048),
-			nn.ReLU(inplace=True),
+			nn.ELU(inplace=True),
       nn.Linear(2048, 1024),
-			nn.ReLU(inplace=True),
+			nn.ELU(inplace=True),
 			nn.Linear(1024, 7)
 		).cuda()
 
